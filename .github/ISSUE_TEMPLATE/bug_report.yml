@@ -1,0 +1,76 @@
+name: Bug Report
+description: Report a bug or issue
+title: "[BUG] "
+labels: ["bug"]
+assignees: []
+
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting an issue! Please fill in the following details.
+
+  - type: textarea
+    id: description
+    attributes:
+      label: Describe the bug
+      description: A clear and concise description of what the bug is
+      placeholder: "Bug description here..."
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: Steps to reproduce the behavior
+      placeholder: |
+        1. Go to...
+        2. Click...
+        3. See error...
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+      description: What you expected to happen
+      placeholder: "Expected behavior here..."
+    validations:
+      required: true
+
+  - type: textarea
+    id: screenshots
+    attributes:
+      label: Screenshots
+      description: If applicable, add screenshots to help explain the issue
+      placeholder: "Add screenshots here..."
+
+  - type: dropdown
+    id: environment
+    attributes:
+      label: Environment
+      description: What environment are you experiencing the issue in?
+      options:
+        - Backend (FastAPI)
+        - Frontend (React)
+        - Database
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs or error messages
+      description: Paste any relevant logs or error messages
+      render: shell
+      placeholder: "Error output here..."
+
+  - type: textarea
+    id: additional
+    attributes:
+      label: Additional context
+      description: Any other context that might help
+      placeholder: "Additional info here..."

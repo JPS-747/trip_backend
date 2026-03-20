@@ -1,0 +1,108 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+pip-wheel-metadata/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual environments
+venv/
+ENV/
+env/
+v310/
+v311/
+v312/
+.venv
+
+# IDE
+.vscode/
+!.vscode/extensions.json
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+*.sublime-workspace
+*.sublime-project
+
+# Database
+*.db
+*.sqlite
+*.sqlite3
+
+# Logs
+*.log
+logs/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+# Node
+node_modules/
+package-lock.json
+yarn.lock
+dist/
+dist-ssr/
+*.local
+
+# Frontend
+frontend-react/dist/
+frontend-react/node_modules/
+frontend-react/package-lock.json
+
+# Test & Debug
+.pytest_cache/
+.coverage
+htmlcov/
+test_*.py
+*_test.py
+.hypothesis/
+
+# CSV exports and test files
+*.csv
+test_export.csv
+test_export.py
+trips.csv
+
+# Backup files
+*.bak
+*.backup
+*.tmp
+*.temp
+
+# Migration test scripts (optional - add if you want to keep only production migrations)
+# check_db.py
+# check_migration.py
+# debug_trips.py
+# test_*.py
+# insert_namibia_holidays.py
+# migrate_*.py
+
+# Environment variables
+.env
+.env.local
+.env.*.local
+
+# OS
+.DS_Store
+Thumbs.db
