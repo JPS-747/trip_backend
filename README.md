@@ -344,7 +344,7 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 ## 👤 Author
 
-Created as a vehicle trip management system for tracking distances, clients, and costs.
+JPS 2026
 
 ## 🙋 Support
 

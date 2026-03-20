@@ -3,8 +3,10 @@ import csv
 import os
 import random
 from datetime import datetime, timedelta
-
-from db import get_db, init_db
+from db_sqlalchemy import get_db, init_db
+from models import Client, Vehicle, PublicHoliday, Setting, Trip
+from sqlalchemy.orm import Session
+from sqlalchemy import or_, and_
 
 TRIPS_FILE = "trips.json"
 CLIENTS_FILE = "clients.json"
@@ -18,26 +20,25 @@ SETTINGS_STARTING_ODOMETER_KEY = "startingOdometer"
 
 
 def get_setting(key: str, default=None):
-    with get_db() as db:
-        row = db.execute("SELECT value FROM settings WHERE key = ?", (key,)).fetchone()
+    for db in get_db():
+        row = db.query(Setting).filter(Setting.key == key).first()
         if not row:
             return default
         try:
-            return json.loads(row["value"])
+            return json.loads(row.value)
         except json.JSONDecodeError:
-            return row["value"]
+            return row.value
 
 
 def set_setting(key: str, value):
-    with get_db() as db:
-        db.execute(
-            """
-            INSERT INTO settings (key, value)
-            VALUES (?, ?)
-            ON CONFLICT(key) DO UPDATE SET value = excluded.value
-            """,
-            (key, json.dumps(value)),
-        )
+    for db in get_db():
+        obj = db.query(Setting).filter(Setting.key == key).first()
+        if obj:
+            obj.value = json.dumps(value)
+        else:
+            obj = Setting(key=key, value=json.dumps(value))
+            db.add(obj)
+        db.commit()
 
 
 def get_starting_odometer() -> float:
@@ -60,79 +61,50 @@ def set_starting_odometer(value: float):
 
 
 def load_public_holidays() -> dict:
-    with get_db() as db:
-        rows = db.execute(
-            "SELECT country, year, date, name FROM public_holidays ORDER BY date"
-        ).fetchall()
+    for db in get_db():
+        rows = db.query(PublicHoliday).order_by(PublicHoliday.date).all()
         if not rows:
             return {"holidays": []}
-        country = rows[0]["country"]
-        year = rows[0]["year"]
-        holidays = [{"date": row["date"], "name": row["name"]} for row in rows]
+        country = rows[0].country
+        year = rows[0].year
+        holidays = [{"date": row.date, "name": row.name} for row in rows]
         return {"country": country, "year": year, "holidays": holidays}
 
 
 def get_holiday_name(date_str: str):
-    """Return the public holiday name for a date, or None."""
-    with get_db() as db:
-        row = db.execute(
-            "SELECT name FROM public_holidays WHERE date = ?", (date_str,)
-        ).fetchone()
+    for db in get_db():
+        row = db.query(PublicHoliday).filter(PublicHoliday.date == date_str).first()
         if row:
-            return row["name"]
+            return row.name
     return None
-
-
-def migrate_public_holidays_json_to_db():
-    """Import public_holidays.json into the DB if the table is empty."""
-    if not os.path.exists(PUBLIC_HOLIDAYS_FILE):
-        return
-    with get_db() as db:
-        count = db.execute("SELECT COUNT(*) FROM public_holidays").fetchone()[0]
-        if count > 0:
-            return  # already migrated
-    with open(PUBLIC_HOLIDAYS_FILE, "r") as f:
-        data = json.load(f)
-    country = data.get("country", "South Africa")
-    year = data.get("year", 2026)
-    holidays = data.get("holidays", [])
-    with get_db() as db:
-        for h in holidays:
-            db.execute(
-                "INSERT OR IGNORE INTO public_holidays (country, year, date, name) VALUES (?, ?, ?, ?)",
-                (country, year, h["date"], h["name"]),
-            )
-
 
 def add_holiday(
     date: str, name: str, country: str = "South Africa", year: int = None
 ) -> dict:
-    """Insert or replace a public holiday. Returns the upserted record."""
     if year is None:
         try:
             year = datetime.strptime(date, "%Y-%m-%d").year
         except ValueError:
             year = 0
-    with get_db() as db:
-        db.execute(
-            "INSERT INTO public_holidays (country, year, date, name) VALUES (?, ?, ?, ?)"
-            " ON CONFLICT(date, name) DO UPDATE SET country=excluded.country, year=excluded.year",
-            (country, year, date, name),
-        )
+    for db in get_db():
+        obj = db.query(PublicHoliday).filter(PublicHoliday.date == date, PublicHoliday.name == name).first()
+        if obj:
+            obj.country = country
+            obj.year = year
+        else:
+            obj = PublicHoliday(country=country, year=year, date=date, name=name)
+            db.add(obj)
+        db.commit()
     return {"date": date, "name": name, "country": country, "year": year}
 
 
 def delete_holiday(date: str, name: str) -> bool:
-    """Delete a holiday by date + name. Returns True if deleted."""
-    with get_db() as db:
-        existing = db.execute(
-            "SELECT id FROM public_holidays WHERE date = ? AND name = ?", (date, name)
-        ).fetchone()
-        if not existing:
+    for db in get_db():
+        obj = db.query(PublicHoliday).filter(PublicHoliday.date == date, PublicHoliday.name == name).first()
+        if not obj:
             return False
-        db.execute(
-            "DELETE FROM public_holidays WHERE date = ? AND name = ?", (date, name)
-        )
+        db.delete(obj)
+        db.commit()
     return True
 
 
@@ -194,20 +166,39 @@ def get_client_record(
 
 
 def load_clients() -> list:
-    with get_db() as db:
-        rows = db.execute(
-            "SELECT * FROM clients WHERE isDisabled = 0 ORDER BY client"
-        ).fetchall()
-        return [normalize_client_record(row) for row in rows]
+    for db in get_db():
+        rows = db.query(Client).filter(Client.isDisabled == False).order_by(Client.client).all()
+        return [
+            {
+                "client": row.client,
+                "distanceFromOffice": row.distanceFromOffice,
+                "fullAddress": row.fullAddress,
+                "isDisabled": row.isDisabled,
+                "phoneNumber": row.phoneNumber,
+                "email": row.email,
+                "contactPerson": row.contactPerson,
+                "city": row.city,
+            }
+            for row in rows
+        ]
 
 
 def get_client_by_name(client_name: str) -> dict | None:
     """Get a single client record by name (including disabled clients)."""
-    with get_db() as db:
-        row = db.execute(
-            "SELECT * FROM clients WHERE client = ?", (client_name,)
-        ).fetchone()
-        if row:
+    for db in get_db():
+        client_obj = db.query(Client).filter(Client.client == client_name).first()
+        if client_obj:
+            # Convert ORM object to dict for normalization
+            row = {
+                "client": client_obj.client,
+                "distanceFromOffice": client_obj.distanceFromOffice,
+                "fullAddress": client_obj.fullAddress,
+                "isDisabled": client_obj.isDisabled,
+                "phoneNumber": client_obj.phoneNumber,
+                "email": client_obj.email,
+                "contactPerson": client_obj.contactPerson,
+                "city": client_obj.city,
+            }
             return normalize_client_record(row)
     return None
 
@@ -222,84 +213,52 @@ def upsert_client(
     contact_person: str = None,
     city: str = None,
 ):
-    with get_db() as db:
-        existing = db.execute(
-            "SELECT * FROM clients WHERE client = ?", (client,)
-        ).fetchone()
-        if existing:
-            existing_dict = dict(existing)
-            new_distance = distance_from_office or existing_dict["distanceFromOffice"]
-            new_address = (
-                full_address
-                if full_address is not None
-                else existing_dict.get("fullAddress")
-            )
-            new_disabled = (
-                int(bool(is_disabled))
-                if is_disabled is not None
-                else int(bool(existing_dict.get("isDisabled", 0)))
-            )
-            new_phone = (
-                phone_number
-                if phone_number is not None
-                else existing_dict.get("phoneNumber")
-            )
-            new_email = email if email is not None else existing_dict.get("email")
-            new_contact = (
-                contact_person
-                if contact_person is not None
-                else existing_dict.get("contactPerson")
-            )
-            new_city = city if city is not None else existing_dict.get("city")
-            db.execute(
-                "UPDATE clients SET distanceFromOffice=?, fullAddress=?, isDisabled=?, phoneNumber=?, email=?, contactPerson=?, city=? WHERE client=?",
-                (
-                    new_distance,
-                    new_address,
-                    new_disabled,
-                    new_phone,
-                    new_email,
-                    new_contact,
-                    new_city,
-                    client,
-                ),
-            )
+    for db in get_db():
+        obj = db.query(Client).filter(Client.client == client).first()
+        if obj:
+            obj.distanceFromOffice = distance_from_office or obj.distanceFromOffice
+            obj.fullAddress = full_address if full_address is not None else obj.fullAddress
+            obj.isDisabled = bool(is_disabled) if is_disabled is not None else obj.isDisabled
+            obj.phoneNumber = phone_number if phone_number is not None else obj.phoneNumber
+            obj.email = email if email is not None else obj.email
+            obj.contactPerson = contact_person if contact_person is not None else obj.contactPerson
+            obj.city = city if city is not None else obj.city
         else:
-            disabled_flag = int(bool(is_disabled)) if is_disabled is not None else 0
-            db.execute(
-                "INSERT INTO clients (client, distanceFromOffice, fullAddress, isDisabled, phoneNumber, email, contactPerson, city) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                (
-                    client,
-                    distance_from_office,
-                    full_address or "",
-                    disabled_flag,
-                    phone_number,
-                    email,
-                    contact_person,
-                    city,
-                ),
+            obj = Client(
+                client=client,
+                distanceFromOffice=distance_from_office,
+                fullAddress=full_address or "",
+                isDisabled=bool(is_disabled) if is_disabled is not None else False,
+                phoneNumber=phone_number,
+                email=email,
+                contactPerson=contact_person,
+                city=city,
             )
+            db.add(obj)
+        db.commit()
 
 
 def delete_client(client: str) -> bool:
     """Delete a client by name. Returns True if deleted, False if not found."""
-    with get_db() as db:
-        existing = db.execute(
-            "SELECT client FROM clients WHERE client = ?", (client,)
-        ).fetchone()
-        if not existing:
+    for db in get_db():
+        obj = db.query(Client).filter(Client.client == client).first()
+        if not obj:
             return False
-        db.execute("DELETE FROM clients WHERE client = ?", (client,))
-    return True
+        db.delete(obj)
+        db.commit()
+        return True
+    return False
 
 
 def set_client_disabled(client: str, is_disabled: bool) -> bool:
-    with get_db() as db:
-        result = db.execute(
-            "UPDATE clients SET isDisabled=? WHERE client=?",
-            (int(bool(is_disabled)), client),
-        )
-        return result.rowcount > 0
+    for db in get_db():
+        obj = db.query(Client).filter(Client.client == client).first()
+        if not obj:
+            return False
+        obj.isDisabled = bool(is_disabled)
+        db.commit()
+        return True
+    return False
 
 
 def import_clients(clients: list) -> int:
@@ -310,7 +269,6 @@ def import_clients(clients: list) -> int:
             continue
         upsert_client(
             client=c["client"],
-            company=c.get("company", ""),
             distance_from_office=c.get("distanceFromOffice", 0.0),
             full_address=c.get("fullAddress", ""),
             is_disabled=c.get("isDisabled"),
@@ -323,50 +281,39 @@ def import_clients(clients: list) -> int:
     return count
 
 
-def migrate_clients_json_to_db():
-    """Import clients.json into the DB if the table is empty."""
-    if not os.path.exists(CLIENTS_FILE):
-        return
-    with get_db() as db:
-        count = db.execute("SELECT COUNT(*) FROM clients").fetchone()[0]
-        if count > 0:
-            return  # already migrated
-    with open(CLIENTS_FILE, "r") as f:
-        clients = json.load(f)
-    for c in clients:
-        upsert_client(
-            client=c.get("client", ""),
-            distance_from_office=c.get("distanceFromOffice", 0.0),
-            full_address=c.get("fullAddress", ""),
-            is_disabled=c.get("isDisabled"),
-            phone_number=c.get("phoneNumber"),
-            email=c.get("email"),
-            contact_person=c.get("contactPerson"),
-            city=c.get("city"),
-        )
-
-
 # ---------------------------------------------------------------------------
 # Vehicle management
 # ---------------------------------------------------------------------------
 
 
 def load_vehicles() -> list:
-    """Load all active vehicles."""
-    with get_db() as db:
-        rows = db.execute(
-            "SELECT * FROM vehicles WHERE isDisabled = 0 ORDER BY regNumber"
-        ).fetchall()
-        return [dict(row) for row in rows]
+    for db in get_db():
+        rows = db.query(Vehicle).filter(Vehicle.isDisabled == False).order_by(Vehicle.regNumber).all()
+        return [dict(
+            regNumber=row.regNumber,
+            make=row.make,
+            model=row.model,
+            year=row.year,
+            kmPerLiter=row.kmPerLiter,
+            currentOdometer=row.currentOdometer,
+            ratePerKm=row.ratePerKm,
+            isDisabled=row.isDisabled
+        ) for row in rows]
 
 
 def get_vehicle(reg_number: str) -> dict | None:
-    """Get a single vehicle by registration number."""
-    with get_db() as db:
-        row = db.execute(
-            "SELECT * FROM vehicles WHERE regNumber = ?", (reg_number,)
-        ).fetchone()
-        return dict(row) if row else None
+    for db in get_db():
+        row = db.query(Vehicle).filter(Vehicle.regNumber == reg_number).first()
+        return dict(
+            regNumber=row.regNumber,
+            make=row.make,
+            model=row.model,
+            year=row.year,
+            kmPerLiter=row.kmPerLiter,
+            currentOdometer=row.currentOdometer,
+            ratePerKm=row.ratePerKm,
+            isDisabled=row.isDisabled
+        ) if row else None
 
 
 def upsert_vehicle(
@@ -379,120 +326,51 @@ def upsert_vehicle(
     rate_per_km: float = None,
     is_disabled: bool | None = None,
 ) -> dict:
-    """Insert or update a vehicle."""
-    with get_db() as db:
-        existing = db.execute(
-            "SELECT * FROM vehicles WHERE regNumber = ?", (reg_number,)
-        ).fetchone()
-        if existing:
-            existing_dict = dict(existing)
-            new_make = make or existing_dict.get("make", "")
-            new_model = model or existing_dict.get("model", "")
-            new_year = year or existing_dict.get("year")
-            new_kml = km_per_liter or existing_dict.get("kmPerLiter", 0.0)
-            new_odometer = (
-                current_odometer
-                if current_odometer is not None
-                else existing_dict.get("currentOdometer")
-            )
-            new_rate = (
-                rate_per_km
-                if rate_per_km is not None
-                else existing_dict.get("ratePerKm")
-            )
-            new_disabled = (
-                int(bool(is_disabled))
-                if is_disabled is not None
-                else int(bool(existing_dict.get("isDisabled", 0)))
-            )
-            db.execute(
-                "UPDATE vehicles SET make=?, model=?, year=?, kmPerLiter=?, currentOdometer=?, ratePerKm=?, isDisabled=? WHERE regNumber=?",
-                (
-                    new_make,
-                    new_model,
-                    new_year,
-                    new_kml,
-                    new_odometer,
-                    new_rate,
-                    new_disabled,
-                    reg_number,
-                ),
-            )
+    for db in get_db():
+        obj = db.query(Vehicle).filter(Vehicle.regNumber == reg_number).first()
+        if obj:
+            obj.make = make or obj.make
+            obj.model = model or obj.model
+            obj.year = year or obj.year
+            obj.kmPerLiter = km_per_liter or obj.kmPerLiter
+            obj.currentOdometer = current_odometer if current_odometer is not None else obj.currentOdometer
+            obj.ratePerKm = rate_per_km if rate_per_km is not None else obj.ratePerKm
+            obj.isDisabled = bool(is_disabled) if is_disabled is not None else obj.isDisabled
         else:
-            disabled_flag = int(bool(is_disabled)) if is_disabled is not None else 0
-            db.execute(
-                "INSERT INTO vehicles (regNumber, make, model, year, kmPerLiter, currentOdometer, ratePerKm, isDisabled) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                (
-                    reg_number,
-                    make or "",
-                    model or "",
-                    year,
-                    km_per_liter or 0.0,
-                    current_odometer or 0.0,
-                    rate_per_km or 0.0,
-                    disabled_flag,
-                ),
+            obj = Vehicle(
+                regNumber=reg_number,
+                make=make or "",
+                model=model or "",
+                year=year,
+                kmPerLiter=km_per_liter or 0.0,
+                currentOdometer=current_odometer or 0.0,
+                ratePerKm=rate_per_km or 0.0,
+                isDisabled=bool(is_disabled) if is_disabled is not None else False
             )
-    return get_vehicle(reg_number) or {}
+            db.add(obj)
+        db.commit()
+        return get_vehicle(reg_number) or {}
 
 
 def delete_vehicle(reg_number: str) -> bool:
-    """Delete a vehicle by registration number."""
-    with get_db() as db:
-        existing = db.execute(
-            "SELECT regNumber FROM vehicles WHERE regNumber = ?", (reg_number,)
-        ).fetchone()
-        if not existing:
+    for db in get_db():
+        obj = db.query(Vehicle).filter(Vehicle.regNumber == reg_number).first()
+        if not obj:
             return False
-        db.execute("DELETE FROM vehicles WHERE regNumber = ?", (reg_number,))
-    return True
+        db.delete(obj)
+        db.commit()
+        return True
 
 
 def set_vehicle_disabled(reg_number: str, is_disabled: bool) -> bool:
-    """Update vehicle disabled status."""
-    with get_db() as db:
-        result = db.execute(
-            "UPDATE vehicles SET isDisabled=? WHERE regNumber=?",
-            (int(bool(is_disabled)), reg_number),
-        )
-        return result.rowcount > 0
-
-
-def update_vehicle_odometer_from_trips(reg_number: str) -> bool:
-    """
-    Update a vehicle's currentOdometer based on its trips.
-    Finds the latest trip for this vehicle and updates the vehicle's
-    currentOdometer to match that trip's odometerEnd.
-    If no trips exist for the vehicle, sets currentOdometer to 0.
-    """
-    if not reg_number:
-        return False
-
-    # Load all trips for this vehicle, sorted by date and id
-    with get_db() as db:
-        rows = db.execute(
-            "SELECT * FROM trips WHERE vehicleRegNumber = ? ORDER BY date DESC, id DESC LIMIT 1",
-            (reg_number,),
-        ).fetchall()
-
-    if not rows:
-        # No trips for this vehicle, reset to 0
-        upsert_vehicle(reg_number, current_odometer=0.0)
+    for db in get_db():
+        obj = db.query(Vehicle).filter(Vehicle.regNumber == reg_number).first()
+        if not obj:
+            return False
+        obj.isDisabled = bool(is_disabled)
+        db.commit()
         return True
 
-    # Get the last (most recent) trip and recalculate odometers for this vehicle
-    all_trips = load_trips()
-    vehicle_trips = [t for t in all_trips if t.get("vehicleRegNumber") == reg_number]
-
-    if vehicle_trips:
-        # Get the final odometer from the last trip
-        last_trip = vehicle_trips[-1]
-        new_odometer = last_trip.get("odometerEnd", 0.0)
-        # Update vehicle's currentOdometer
-        upsert_vehicle(reg_number, current_odometer=new_odometer)
-        return True
-
-    return False
 
 
 def normalize_trip_record(trip) -> dict:
@@ -552,62 +430,21 @@ def normalize_trip_record(trip) -> dict:
     return built
 
 
-def build_trip(
-    date: str,
-    client: str,
-    city: str,
-    distance_km: float,
-    trip_type: int,
-    is_private_trip: bool = False,
-    vehicle_reg_number: str | None = None,
-) -> dict:
-    """Build a complete trip record with all computed fields."""
-    trip = {
-        "date": date,
-        "client": client,
-        "city": city,
-        "distanceKm": round(distance_km, 1),
-        "totalDistanceKm": round(distance_km * trip_type, 1),
-        "tripType": trip_type,
-        "isPrivateTrip": bool(is_private_trip),
-        "vehicleRegNumber": vehicle_reg_number,
-    }
-
-    # Determine day type
-    date_obj = datetime.strptime(date, "%Y-%m-%d")
-    trip["isWeekday"] = date_obj.weekday() < 5  # Monday-Friday
-    trip["isSaturday"] = date_obj.weekday() == 5
-    trip["isSunday"] = date_obj.weekday() == 6
-
-    # Check if it's a public holiday
-    holiday_name = get_holiday_name(date)
-    trip["isPublicHoliday"] = bool(holiday_name)
-    trip["publicHolidayName"] = holiday_name
-
-    # Determine rate type and per-km rate
-    if trip["isPublicHoliday"]:
-        trip["rateType"] = "Public Holiday"
-        trip["ratePerKm"] = PUBLIC_HOLIDAY_RATE
-    elif trip["isSunday"]:
-        trip["rateType"] = "Sunday"
-        trip["ratePerKm"] = SUNDAY_RATE
-    elif trip["isSaturday"]:
-        trip["rateType"] = "Saturday"
-        trip["ratePerKm"] = SATURDAY_RATE
-    else:  # Weekday
-        trip["rateType"] = "Weekday"
-        trip["ratePerKm"] = WEEKDAY_RATE
-
-    # Calculate total amount
-    trip["totalAmount"] = round(trip["totalDistanceKm"] * trip["ratePerKm"], 2)
-
-    return trip
-
 
 def load_raw_trips() -> list:
-    with get_db() as db:
-        rows = db.execute("SELECT * FROM trips ORDER BY date, id").fetchall()
-        return [dict(row) for row in rows]
+    for db in get_db():
+        rows = db.query(Trip).order_by(Trip.date, Trip.id).all()
+        return [dict(
+            id=row.id,
+            date=row.date,
+            client=row.client,
+            city=row.city,
+            distanceKm=row.distanceKm,
+            totalDistanceKm=row.totalDistanceKm,
+            tripType=row.tripType,
+            isPrivateTrip=row.isPrivateTrip,
+            vehicleRegNumber=row.vehicleRegNumber
+        ) for row in rows]
 
 
 def load_trips() -> list:
@@ -670,29 +507,25 @@ def apply_odometer_readings(trips: list, start_reading: float = None) -> list:
 
 
 def _insert_trip_db(trip: dict) -> int:
-    with get_db() as db:
-        cursor = db.execute(
-            """
-            INSERT INTO trips
-              (date, client, city, distanceKm, totalDistanceKm, tripType, isPrivateTrip, vehicleRegNumber)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                trip["date"],
-                trip["client"],
-                trip["city"],
-                trip["distanceKm"],
-                trip["totalDistanceKm"],
-                trip["tripType"],
-                int(trip.get("isPrivateTrip", 0)),
-                trip.get("vehicleRegNumber"),
-            ),
+    for db in get_db():
+        trip_obj = Trip(
+            date=trip["date"],
+            client=trip["client"],
+            city=trip["city"],
+            distanceKm=trip["distanceKm"],
+            totalDistanceKm=trip["totalDistanceKm"],
+            tripType=trip["tripType"],
+            isPrivateTrip=int(trip.get("isPrivateTrip", 0)),
+            vehicleRegNumber=trip.get("vehicleRegNumber"),
         )
-        return cursor.lastrowid
+        db.add(trip_obj)
+        db.commit()
+        db.refresh(trip_obj)
+        return trip_obj.id
 
 
 def _insert_trip_db_with_odometer_update(trip: dict) -> int:
-    """Insert a trip and update vehicle odometer if a vehicle is associated."""
+    """Inserts a trip and update vehicle odometer if a vehicle is associated."""
     trip_id = _insert_trip_db(trip)
 
     # Update vehicle's odometer if a vehicle is associated with this trip
@@ -710,38 +543,53 @@ def _insert_trip_db_with_odometer_update(trip: dict) -> int:
 
 def save_trips(trips: list):
     """Replace all trips in the DB with the given list."""
-    with get_db() as db:
+    for db in get_db():
         db.execute("DELETE FROM trips")
     for trip in trips:
         _insert_trip_db(trip)
 
 
 def get_trip(trip_id: int) -> dict | None:
-    with get_db() as db:
-        row = db.execute("SELECT * FROM trips WHERE id = ?", (trip_id,)).fetchone()
-        if not row:
+    for db in get_db():
+        trip_obj = db.query(Trip).filter(Trip.id == trip_id).first()
+        if not trip_obj:
             return None
-        trip = normalize_trip_record(row)
+        # Convert ORM object to dict for normalization
+        trip_dict = {
+            "id": trip_obj.id,
+            "date": trip_obj.date,
+            "client": trip_obj.client,
+            "city": trip_obj.city,
+            "distanceKm": trip_obj.distanceKm,
+            "totalDistanceKm": trip_obj.totalDistanceKm,
+            "tripType": trip_obj.tripType,
+            "isPrivateTrip": trip_obj.isPrivateTrip,
+            "vehicleRegNumber": trip_obj.vehicleRegNumber,
+        }
+        trip = normalize_trip_record(trip_dict)
 
-        # Get the vehicle registration if assigned
         vehicle_reg = trip.get("vehicleRegNumber")
 
         if vehicle_reg:
             # Load all trips for this vehicle, sorted by date and ID to get correct sequence
-            with get_db() as db:
-                rows = db.execute(
-                    "SELECT * FROM trips WHERE vehicleRegNumber = ? ORDER BY date, id",
-                    (vehicle_reg,),
-                ).fetchall()
-                vehicle_trips = [normalize_trip_record(dict(r)) for r in rows]
+            vehicle_trips = db.query(Trip).filter(Trip.vehicleRegNumber == vehicle_reg).order_by(Trip.date, Trip.id).all()
+            vehicle_trips = [normalize_trip_record({
+                "id": t.id,
+                "date": t.date,
+                "client": t.client,
+                "city": t.city,
+                "distanceKm": t.distanceKm,
+                "totalDistanceKm": t.totalDistanceKm,
+                "tripType": t.tripType,
+                "isPrivateTrip": t.isPrivateTrip,
+                "vehicleRegNumber": t.vehicleRegNumber,
+            }) for t in vehicle_trips]
 
             # Get vehicle's current odometer from DB
-            vehicle = get_vehicle(vehicle_reg)
+            vehicle = db.query(Vehicle).filter(Vehicle.regNumber == vehicle_reg).first()
             if vehicle:
-                final_odometer = vehicle.get("currentOdometer", 0.0) or 0.0
-                total_distance = sum(
-                    t.get("totalDistanceKm", 0) or 0 for t in vehicle_trips
-                )
+                final_odometer = vehicle.currentOdometer or 0.0
+                total_distance = sum(t.get("totalDistanceKm", 0) or 0 for t in vehicle_trips)
                 starting_odometer = final_odometer - total_distance
 
                 # Apply odometer readings going forward
@@ -756,13 +604,18 @@ def get_trip(trip_id: int) -> dict | None:
         else:
             # No vehicle assigned, use global odometer calculation
             start_reading = get_starting_odometer()
-            # Load all unassigned trips to calculate position
-            with get_db() as db:
-                rows = db.execute(
-                    "SELECT * FROM trips WHERE vehicleRegNumber IS NULL ORDER BY date, id",
-                    (),
-                ).fetchall()
-                all_unassigned = [normalize_trip_record(dict(r)) for r in rows]
+            all_unassigned = db.query(Trip).filter(Trip.vehicleRegNumber == None).order_by(Trip.date, Trip.id).all()
+            all_unassigned = [normalize_trip_record({
+                "id": t.id,
+                "date": t.date,
+                "client": t.client,
+                "city": t.city,
+                "distanceKm": t.distanceKm,
+                "totalDistanceKm": t.totalDistanceKm,
+                "tripType": t.tripType,
+                "isPrivateTrip": t.isPrivateTrip,
+                "vehicleRegNumber": t.vehicleRegNumber,
+            }) for t in all_unassigned]
 
             current = start_reading
             for utrip in all_unassigned:
@@ -774,8 +627,6 @@ def get_trip(trip_id: int) -> dict | None:
                     break
 
         return trip
-
-
 def create_trip_record(
     *,
     date: str,
@@ -843,7 +694,7 @@ def update_trip_record(
     trip["totalDistanceKm"] = round(total_distance_km, 1)
     # Recalculate totalAmount based on the new total distance
     trip["totalAmount"] = round(trip["totalDistanceKm"] * trip["ratePerKm"], 2)
-    with get_db() as db:
+    for db in get_db():
         result = db.execute(
             """
             UPDATE trips
@@ -897,7 +748,7 @@ def delete_trip_record(trip_id: int) -> bool:
     vehicle_reg_number = trip.get("vehicleRegNumber") if trip else None
     trip_distance = trip.get("totalDistanceKm", 0) if trip else 0
 
-    with get_db() as db:
+    for db in get_db():
         result = db.execute("DELETE FROM trips WHERE id = ?", (trip_id,))
         deleted = result.rowcount > 0
 
@@ -920,27 +771,24 @@ def cleanup_trips_data() -> list:
 
 
 def clear_trips_data(start_date: str | None = None, end_date: str | None = None) -> int:
-    with get_db() as db:
+    for db in get_db():
         # First, fetch all trips that will be deleted to update vehicle odometers
         if start_date or end_date:
-            query = "SELECT * FROM trips WHERE 1=1"
-            params = []
+            q = db.query(Trip)
             if start_date:
-                query += " AND date >= ?"
-                params.append(start_date)
+                q = q.filter(Trip.date >= start_date)
             if end_date:
-                query += " AND date <= ?"
-                params.append(end_date)
-            trips_to_delete = db.execute(query, params).fetchall()
+                q = q.filter(Trip.date <= end_date)
+            trips_to_delete = q.all()
         else:
-            trips_to_delete = db.execute("SELECT * FROM trips").fetchall()
+            trips_to_delete = db.query(Trip).all()
 
     # Deduct distances from vehicle odometers
     vehicle_distance_map = {}  # Map vehicle reg -> total distance to deduct
     for trip in trips_to_delete:
-        vehicle_reg = trip["vehicleRegNumber"]
+        vehicle_reg = trip.vehicleRegNumber
         if vehicle_reg:
-            total_distance = trip["totalDistanceKm"] or 0
+            total_distance = trip.totalDistanceKm or 0
             vehicle_distance_map[vehicle_reg] = (
                 vehicle_distance_map.get(vehicle_reg, 0) + total_distance
             )
@@ -956,101 +804,33 @@ def clear_trips_data(start_date: str | None = None, end_date: str | None = None)
             upsert_vehicle(vehicle_reg, current_odometer=new_odo)
 
     # Now delete the trips
-    with get_db() as db:
+    for db in get_db():
         if start_date or end_date:
-            query = "DELETE FROM trips WHERE 1=1"
-            params = []
+            q = db.query(Trip)
             if start_date:
-                query += " AND date >= ?"
-                params.append(start_date)
+                q = q.filter(Trip.date >= start_date)
             if end_date:
-                query += " AND date <= ?"
-                params.append(end_date)
-            print(f"DEBUG: Executing query: {query}")
-            print(f"DEBUG: With params: {params}")
-            cursor = db.execute(query, params)
-            trip_count = cursor.rowcount
+                q = q.filter(Trip.date <= end_date)
+            trip_count = q.delete(synchronize_session=False)
+            db.commit()
             print(f"DEBUG: Deleted {trip_count} trips")
         else:
             print(f"DEBUG: Clearing all trips")
-            db.execute("DELETE FROM trips")
-            trip_count = 0  # When clearing all, we don't easily get count, so return 0
+            trip_count = db.query(Trip).delete(synchronize_session=False)
+            db.commit()
     return trip_count
 
 
 def clear_clients_data() -> list:
-    with get_db() as db:
+    for db in get_db():
         db.execute("DELETE FROM clients")
     return []
 
 
 def clear_holidays_data() -> list:
-    with get_db() as db:
+    for db in get_db():
         db.execute("DELETE FROM public_holidays")
     return []
-
-
-def migrate_trips_json_to_db():
-    """Import trips.json into the DB if the table is empty."""
-    if not os.path.exists(TRIPS_FILE):
-        return
-    with get_db() as db:
-        count = db.execute("SELECT COUNT(*) FROM trips").fetchone()[0]
-        if count > 0:
-            return  # already migrated
-    with open(TRIPS_FILE, "r") as f:
-        trips = json.load(f)
-    for t in trips:
-        trip = normalize_trip_record(t)
-        _insert_trip_db(trip)
-
-
-def migrate_add_isdisabled_column_to_clients():
-    """Ensure clients table has an isDisabled flag."""
-    with get_db() as db:
-        columns = [
-            row[1] for row in db.execute("PRAGMA table_info(clients)").fetchall()
-        ]
-        if "isDisabled" not in columns:
-            db.execute("ALTER TABLE clients ADD COLUMN isDisabled INTEGER DEFAULT 0")
-
-
-def migrate_add_isprivatetrip_column_to_trips():
-    """Ensure trips table has an isPrivateTrip flag."""
-    with get_db() as db:
-        columns = [row[1] for row in db.execute("PRAGMA table_info(trips)").fetchall()]
-        if "isPrivateTrip" not in columns:
-            db.execute("ALTER TABLE trips ADD COLUMN isPrivateTrip INTEGER DEFAULT 0")
-
-
-def migrate_add_vehicleregnumber_column_to_trips():
-    """Ensure trips table has a vehicleRegNumber field."""
-    with get_db() as db:
-        columns = [row[1] for row in db.execute("PRAGMA table_info(trips)").fetchall()]
-        if "vehicleRegNumber" not in columns:
-            db.execute(
-                "ALTER TABLE trips ADD COLUMN vehicleRegNumber TEXT REFERENCES vehicles(regNumber)"
-            )
-
-
-def migrate_add_currentodometer_column_to_vehicles():
-    """Ensure vehicles table has a currentOdometer field."""
-    with get_db() as db:
-        columns = [
-            row[1] for row in db.execute("PRAGMA table_info(vehicles)").fetchall()
-        ]
-        if "currentOdometer" not in columns:
-            db.execute("ALTER TABLE vehicles ADD COLUMN currentOdometer REAL DEFAULT 0")
-
-
-def migrate_add_rateperKm_column_to_vehicles():
-    """Ensure vehicles table has a ratePerKm field."""
-    with get_db() as db:
-        columns = [
-            row[1] for row in db.execute("PRAGMA table_info(vehicles)").fetchall()
-        ]
-        if "ratePerKm" not in columns:
-            db.execute("ALTER TABLE vehicles ADD COLUMN ratePerKm REAL DEFAULT 0")
 
 
 # ---------------------------------------------------------------------------
@@ -1218,7 +998,7 @@ def generate_sample_trips(
             city = client.get("city") or "Unassigned"
             city_counts[city] = city_counts.get(city, 0) + 1
 
-        # Select primary client (first trip of the day)
+        # Selected primary client (first trip of the day)
         # Weight selection by number of clients in each city
         primary_client = random.choice(available_clients)
         primary_city = primary_client.get("city") or "Unassigned"
@@ -1320,20 +1100,20 @@ def holidays_in_range(start_date, end_date) -> list:
         end_date.strftime("%Y-%m-%d") if hasattr(end_date, "strftime") else end_date
     )
 
-    with get_db() as db:
-        rows = db.execute(
-            "SELECT date, name FROM public_holidays WHERE date >= ? AND date <= ? ORDER BY date",
-            (start_str, end_str),
-        ).fetchall()
-        return [{"date": row["date"], "name": row["name"]} for row in rows]
+    for db in get_db():
+        rows = (
+            db.query(PublicHoliday)
+            .filter(PublicHoliday.date >= start_str, PublicHoliday.date <= end_str)
+            .order_by(PublicHoliday.date)
+            .all()
+        )
+        return [{"date": row.date, "name": row.name} for row in rows]
 
 
 def is_public_holiday(date_str: str) -> bool:
-    """Check if a given date is a public holiday."""
-    with get_db() as db:
-        row = db.execute(
-            "SELECT id FROM public_holidays WHERE date = ?", (date_str,)
-        ).fetchone()
+    """Check if a given date is a public holiday using SQLAlchemy ORM."""
+    for db in get_db():
+        row = db.query(PublicHoliday).filter(PublicHoliday.date == date_str).first()
         return row is not None
 
 
@@ -1811,6 +1591,17 @@ def add_sample_data(
     )
 
 
+
+def emit_progress(step: str, details: dict = None, progress_callback=None):
+    """Emit progress update via callback."""
+    if progress_callback:
+        try:
+            progress_callback(step, details or {})
+        except Exception as e:
+            print(f"[emit_progress] Error emitting progress: {e}")
+    print(f"[emit_progress] {step}: {details or {}}")
+
+
 # ---------------------------------------------------------------------------
 # CSV export
 # ---------------------------------------------------------------------------
@@ -1835,20 +1626,35 @@ def export_to_csv(filename="trips.csv"):
 
 
 # ---------------------------------------------------------------------------
-# Startup: initialise DB and migrate legacy JSON data
+# Public holidays CSV export/import
 # ---------------------------------------------------------------------------
+def export_public_holidays(filename="public_holidays.csv"):
+    """Export all public holidays to a CSV file."""
+    for db in get_db():
+        holidays = db.query(PublicHoliday).order_by(PublicHoliday.date).all()
+        fieldnames = ["date", "name", "country", "year"]
+        with open(filename, "w", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            writer.writeheader()
+            for h in holidays:
+                writer.writerow({
+                    "date": h.date,
+                    "name": h.name,
+                    "country": h.country,
+                    "year": h.year,
+                })
+
+
+def import_public_holidays(filename="public_holidays.csv"):
+    """Import public holidays from a CSV file."""
+    with open(filename, newline="") as f:
+        reader = csv.DictReader(f)
+        holidays = [row for row in reader]
+    import_holidays(holidays)
 
 
 def startup():
     init_db()
-    migrate_add_isdisabled_column_to_clients()
-    migrate_add_isprivatetrip_column_to_trips()
-    migrate_add_vehicleregnumber_column_to_trips()
-    migrate_add_currentodometer_column_to_vehicles()
-    migrate_add_rateperKm_column_to_vehicles()
-    migrate_public_holidays_json_to_db()
-    migrate_clients_json_to_db()
-    migrate_trips_json_to_db()
 
 
 # ---------------------------------------------------------------------------
@@ -1857,6 +1663,4 @@ def startup():
 
 if __name__ == "__main__":
     startup()
-    add_sample_data()
-    export_to_csv()
-    print("Sample trips added and exported to trips.csv")
+    print("Database initialized successfully")

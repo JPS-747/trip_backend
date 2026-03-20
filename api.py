@@ -6,7 +6,7 @@ import asyncio
 import traceback
 import logging
 
-from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect, UploadFile, File, Body
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
@@ -441,6 +441,12 @@ def import_holidays(holidays: List[HolidayCreate]):
         "holidays": app.load_public_holidays(),
     }
 
+@api.get("/holidays/export")
+def export_public_holidays():
+    app.export_public_holidays()
+    return FileResponse("public_holidays.csv", media_type="text/csv", filename="public_holidays.csv")
+
+
 
 @api.post("/seed-sample-data")
 def seed_sample_data(payload: Optional[SeedRequest] = None):
@@ -532,3 +538,37 @@ def clear_holidays():
         "message": "Holidays cleared successfully",
         "holidayCount": 0,
     }
+
+
+@api.patch("/holidays")
+def patch_holidays(holidays: List[HolidayCreate] = Body(...)):
+    """
+    Patch (bulk update) public holidays. Each record must include date and name as keys.
+    If a holiday exists (by date and name), it will be updated; otherwise, it will be created.
+    """
+    updated = 0
+    created = 0
+    for h in holidays:
+        # Try to update existing holiday
+        found = False
+        for db in app.get_db():
+            obj = db.query(app.PublicHoliday).filter(app.PublicHoliday.date == h.date, app.PublicHoliday.name == h.name).first()
+            if obj:
+                obj.country = h.country
+                obj.year = h.year
+                db.commit()
+                updated += 1
+                found = True
+                break
+        if not found:
+            app.add_holiday(h.date, h.name, h.country, h.year)
+            created += 1
+    return {
+        "message": f"{updated} holiday(s) updated, {created} created",
+        "updated": updated,
+        "created": created,
+        "holidays": app.load_public_holidays(),
+    }
+
+
+
