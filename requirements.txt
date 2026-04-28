@@ -1,3 +1,5 @@
+# For environment variable support
+python-dotenv
 fastapi==0.116.1
 pydantic==2.11.7
 python-multipart==0.0.7
