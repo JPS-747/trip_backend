@@ -1,6 +1,7 @@
 # For environment variable support
 python-dotenv
 fastapi==0.116.1
+uvicorn[standard]
 pydantic==2.11.7
 python-multipart==0.0.7
 websockets==11.0.3
