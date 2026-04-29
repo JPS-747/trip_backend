@@ -122,13 +122,13 @@ def queue_progress(message_type: str, data: dict):
     _progress_queue.put({"type": message_type, "data": data})
 
 
-app = FastAPI(
+api = FastAPI(
     title="Trippen API",
     version="1.0.0",
     description="FastAPI interface for trip records, clients, public holidays, and CSV export.",
 )
 
-app.add_middleware(
+api.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
     allow_credentials=True,
@@ -137,7 +137,7 @@ app.add_middleware(
 )
 
 
-@app.get("/")
+@api.get("/")
 def root():
     return {
         "message": "Trippen API is running",
@@ -152,7 +152,7 @@ def root():
     }
 
 
-@app.websocket("/ws/seed-progress")
+@api.websocket("/ws/seed-progress")
 async def websocket_seed_progress(websocket: WebSocket):
     # Log handshake details before accepting
     logger.info("Handshake request path: %s", websocket.url.path)
@@ -192,7 +192,7 @@ async def websocket_seed_progress(websocket: WebSocket):
         set_seeding_websocket(None)
 
 
-@app.get("/trips")
+@api.get("/trips")
 def get_trips(
     page: int = Query(1, ge=1),
     pageSize: int = Query(10, ge=1, le=10000),
@@ -211,7 +211,7 @@ def get_trips(
     )
 
 
-@app.post("/trips")
+@api.post("/trips")
 def create_trip(payload: TripCreate):
     try:
         # Calculate total distance based on trip type multiplier
@@ -242,7 +242,7 @@ def create_trip(payload: TripCreate):
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
-@app.get("/trips/{trip_id}")
+@api.get("/trips/{trip_id}")
 def get_trip_detail(trip_id: int):
     trip = helper.get_trip(trip_id)
     if not trip:
@@ -250,7 +250,7 @@ def get_trip_detail(trip_id: int):
     return trip
 
 
-@app.put("/trips/{trip_id}")
+@api.put("/trips/{trip_id}")
 def update_trip(trip_id: int, payload: TripCreate):
     try:
         # Calculate total distance based on trip type multiplier
@@ -282,7 +282,7 @@ def update_trip(trip_id: int, payload: TripCreate):
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
-@app.delete("/trips/{trip_id}")
+@api.delete("/trips/{trip_id}")
 def delete_trip(trip_id: int):
     deleted = helper.delete_trip_record(trip_id)
     if not deleted:
@@ -290,7 +290,7 @@ def delete_trip(trip_id: int):
     return {"message": f"Trip '{trip_id}' deleted successfully"}
 
 
-@app.get("/clients")
+@api.get("/clients")
 def get_clients(
     page: int = 1, pageSize: int = 10, sortBy: str = "client", sortOrder: str = "asc"
 ):
@@ -302,7 +302,7 @@ def get_clients(
     )
 
 
-@app.post("/clients", status_code=201)
+@api.post("/clients", status_code=201)
 def create_client(payload: ClientCreate):
     helper.upsert_client(
         client=payload.client,
@@ -317,7 +317,7 @@ def create_client(payload: ClientCreate):
     return helper.filter_sort_paginate_clients()
 
 
-@app.delete("/clients/{client_name}")
+@api.delete("/clients/{client_name}")
 def delete_client(client_name: str):
     deleted = helper.delete_client(client_name)
     if not deleted:
@@ -325,7 +325,7 @@ def delete_client(client_name: str):
     return {"message": f"Client '{client_name}' deleted successfully"}
 
 
-@app.patch("/clients/{client_name}/status")
+@api.patch("/clients/{client_name}/status")
 def update_client_status(client_name: str, payload: ClientStatusUpdate):
     updated = helper.set_client_disabled(client_name, payload.isDisabled)
     if not updated:
@@ -337,7 +337,7 @@ def update_client_status(client_name: str, payload: ClientStatusUpdate):
     }
 
 
-@app.post("/clients/import")
+@api.post("/clients/import")
 def import_clients(clients: List[ClientCreate]):
     print("[clients/import] Received payload:")
     print(json.dumps([c.model_dump() for c in clients], indent=2))
@@ -358,12 +358,12 @@ def import_clients(clients: List[ClientCreate]):
     return {"message": f"{count} client(s) imported", "clients": helper.load_clients()}
 
 
-@app.get("/vehicles")
+@api.get("/vehicles")
 def get_vehicles():
     return helper.load_vehicles()
 
 
-@app.post("/vehicles", status_code=201)
+@api.post("/vehicles", status_code=201)
 def create_vehicle(payload: VehicleCreate):
     helper.upsert_vehicle(
         reg_number=payload.regNumber,
@@ -378,7 +378,7 @@ def create_vehicle(payload: VehicleCreate):
     return helper.load_vehicles()
 
 
-@app.delete("/vehicles/{reg_number}")
+@api.delete("/vehicles/{reg_number}")
 def delete_vehicle(reg_number: str):
     deleted = helper.delete_vehicle(reg_number)
     if not deleted:
@@ -386,7 +386,7 @@ def delete_vehicle(reg_number: str):
     return {"message": f"Vehicle '{reg_number}' deleted successfully"}
 
 
-@app.patch("/vehicles/{reg_number}/status")
+@api.patch("/vehicles/{reg_number}/status")
 def update_vehicle_status(reg_number: str, payload: VehicleStatusUpdate):
     updated = helper.set_vehicle_disabled(reg_number, payload.isDisabled)
     if not updated:
@@ -398,12 +398,12 @@ def update_vehicle_status(reg_number: str, payload: VehicleStatusUpdate):
     }
 
 
-@app.get("/holidays")
+@api.get("/holidays")
 def get_holidays():
     return helper.load_public_holidays()
 
 
-@app.post("/holidays", status_code=201)
+@api.post("/holidays", status_code=201)
 def create_holiday(payload: HolidayCreate):
     helper.add_holiday(
         date=payload.date,
@@ -414,7 +414,7 @@ def create_holiday(payload: HolidayCreate):
     return helper.load_public_holidays()
 
 
-@app.delete("/holidays")
+@api.delete("/holidays")
 def delete_holiday(date: str, name: str):
     deleted = helper.delete_holiday(date, name)
     if not deleted:
@@ -424,7 +424,7 @@ def delete_holiday(date: str, name: str):
     return {"message": f"Holiday '{name}' on {date} deleted successfully"}
 
 
-@app.post("/holidays/import")
+@api.post("/holidays/import")
 def import_holidays(holidays: List[HolidayCreate]):
     records = [
         {
@@ -441,14 +441,14 @@ def import_holidays(holidays: List[HolidayCreate]):
         "holidays": helper.load_public_holidays(),
     }
 
-@app.get("/holidays/export")
+@api.get("/holidays/export")
 def export_public_holidays():
     helper.export_public_holidays()
     return FileResponse("public_holidays.csv", media_type="text/csv", filename="public_holidays.csv")
 
 
 
-@app.post("/seed-sample-data")
+@api.post("/seed-sample-data")
 def seed_sample_data(payload: Optional[SeedRequest] = None):
     seed_options = payload or SeedRequest()
     print(f"[seed_sample_data] Received payload: {seed_options.model_dump()}")
@@ -487,7 +487,7 @@ def seed_sample_data(payload: Optional[SeedRequest] = None):
     }
 
 
-@app.post("/export-csv")
+@api.post("/export-csv")
 def export_csv():
     helper.export_to_csv()
     return {
@@ -496,13 +496,13 @@ def export_csv():
     }
 
 
-@app.get("/download-csv")
+@api.get("/download-csv")
 def download_csv():
     helper.export_to_csv()
     return FileResponse("trips.csv", media_type="text/csv", filename="trips.csv")
 
 
-@app.post("/cleanup-trips")
+@api.post("/cleanup-trips")
 def cleanup_trips():
     cleaned_trips = helper.cleanup_trips_data()
     return {
@@ -511,7 +511,7 @@ def cleanup_trips():
     }
 
 
-@app.post("/clear-trips")
+@api.post("/clear-trips")
 def clear_trips(startDate: str | None = None, endDate: str | None = None):
     print(f"DEBUG API: Received startDate={startDate}, endDate={endDate}")
     trip_count = helper.clear_trips_data(startDate, endDate)
@@ -522,7 +522,7 @@ def clear_trips(startDate: str | None = None, endDate: str | None = None):
     }
 
 
-@app.post("/clear-clients")
+@api.post("/clear-clients")
 def clear_clients():
     helper.clear_clients_data()
     return {
@@ -531,7 +531,7 @@ def clear_clients():
     }
 
 
-@app.post("/clear-holidays")
+@api.post("/clear-holidays")
 def clear_holidays():
     helper.clear_holidays_data()
     return {
@@ -540,7 +540,7 @@ def clear_holidays():
     }
 
 
-@app.patch("/holidays")
+@api.patch("/holidays")
 def patch_holidays(holidays: List[HolidayCreate] = Body(...)):
     """
     Patch (bulk update) public holidays. Each record must include date and name as keys.
@@ -572,4 +572,4 @@ def patch_holidays(holidays: List[HolidayCreate] = Body(...)):
 
 
 if __name__ == "__main__":
-    uvicorn.run("app:app", host="0.0.0.0", port=8000)
+    uvicorn.run("app:api", host="0.0.0.0", port=8000)
